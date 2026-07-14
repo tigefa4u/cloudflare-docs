@@ -1,0 +1,94 @@
+---
+title: Get started with health-mediated deployments
+description: Enable HMD for your Worker using cf hmd start and watch your first progressive rollout.
+pcx_content_type: get-started
+sidebar:
+  order: 1
+products:
+  - artifacts
+---
+
+import { Steps, TypeScriptExample } from "~/components";
+
+This guide enables health-mediated deployments for an existing Worker. After setup, every deployment uses a progressive rollout with automatic health checks instead of an immediate 100% promotion.
+
+## Prerequisites
+
+- A deployed Worker with a `cloudflare.config.ts`.
+- [Workers Logs](/workers/observability/logs/workers-logs/) enabled on the Worker so HMD has observability data to query.
+
+## 1. Run cf hmd start
+
+In your project directory, run:
+
+```sh
+cf hmd start
+```
+
+The CLI checks whether your project already has an HMD plan configured. If not, it prompts you to choose between the simple case and a BYO Workflow.
+
+```txt
+? Choose a rollout mode:
+  Simple case — Cloudflare manages the rollout plan
+  BYO Workflow — Write your own cloudflare.hmd.ts
+```
+
+## 2. Configure the simple case
+
+Select **Simple case**. The CLI prompts you for rollout parameters:
+
+```txt
+? Rollout steps (percentages): 10, 25, 50, 75, 100
+? Soak time per step: 5 minutes
+? Error threshold to pause rollout (HTTP 500 rate): 6%
+? On threshold breach: automatic rollback or pause for manual input?
+  > Automatic rollback
+    Pause and wait for manual input
+```
+
+Accept the defaults or enter your own values. The CLI writes the `hmd` block into your `cloudflare.config.ts`:
+
+<TypeScriptExample filename="cloudflare.config.ts">
+
+```ts
+import { defineConfig } from "cloudflare/config";
+
+export default defineConfig({
+	name: "my-worker",
+	compatibilityDate: "2026-01-01",
+	hmd: {
+		plan: "cloudflare/default",
+		steps: [10, 25, 50, 75, 100],
+		soakTime: "5 minutes",
+		rollback: [{ statusCode: 500, threshold: 0.06 }],
+		onBreach: "rollback",
+	},
+});
+```
+
+</TypeScriptExample>
+
+## 3. Deploy your Worker
+
+Deploy normally. HMD intercepts the deployment and begins a progressive rollout instead of an immediate promotion.
+
+```sh
+npx wrangler deploy
+```
+
+## 4. Watch the rollout
+
+In the [Cloudflare dashboard](https://dash.cloudflare.com), go to **Workers and Pages**, select your Worker, and open the **Deployments** tab. The active rollout appears as a Workflow instance with step-level progress:
+
+- Current traffic percentage
+- Soak time remaining at each step
+- Health query results
+- Rollback events if a threshold was breached
+
+Each step in the Deployments tab maps to a step in the underlying Workflow. Select a step to view its log output.
+
+## Next steps
+
+- [How HMD works](/artifacts/deployments/how-hmd-works/) — understand the HMDWorkflow model, health queries, and rollback
+- [Write your own HMD Workflow](/artifacts/deployments/write-your-own/) — define custom rollout percentages, health queries, Flagship flag changes, and external integrations
+- [Reference](/artifacts/deployments/reference/) — full `HMDWorkflow` API and `cloudflare.config.ts` HMD config fields

@@ -1,0 +1,137 @@
+---
+title: How CI works
+description: Understand how CIWorkflow, dependency caching, and parallel step runners compose into a full CI pipeline on Cloudflare.
+pcx_content_type: concept
+sidebar:
+  order: 1
+products:
+  - artifacts
+---
+
+import { TypeScriptExample } from "~/components";
+
+CI on Workflows defines a pipeline as a TypeScript class in `cloudflare.ci.ts`. The class extends `CIWorkflow`, which extends [`WorkflowEntrypoint`](/workflows/build/workers-api/). Each pipeline run is a durable Workflow instance.
+
+:::note
+
+The `cloudflare:ci` package name is subject to change before general availability.
+
+:::
+
+## CIWorkflow
+
+`CIWorkflow` is a base class that you extend to define your pipeline. You implement one method: `pipeline`.
+
+```ts
+// cloudflare.ci.ts
+import { CIWorkflow } from "cloudflare:ci";
+import type { WorkflowEvent } from "cloudflare:workers";
+import type { CiParams, CiRunnerStep } from "cloudflare:ci";
+
+export class CI extends CIWorkflow {
+	protected async pipeline(
+		event: WorkflowEvent<CiParams>,
+		step: CiRunnerStep,
+	): Promise<void> {
+		// your pipeline logic
+	}
+}
+```
+
+`CiParams` carries the event context: which branch triggered the run, what kind of trigger it was, and what the repository's default branch is. Use these fields to gate deploy steps so they only run on pushes to the default branch.
+
+## Dependency caching
+
+`step.cache(lockfiles)` installs dependencies once and captures the result as a reusable snapshot. Subsequent steps that need those dependencies receive the same snapshot rather than running the install again.
+
+```ts
+const deps = await step
+	.cache([
+		"pnpm-lock.yaml",
+		"package.json",
+		"apps/*/package.json",
+		"packages/*/package.json",
+	])
+	.runner("install", { exec: "pnpm install --frozen-lockfile" });
+```
+
+If none of the listed lockfiles have changed since the last run, the cache is considered valid and the pipeline skips the install step entirely. This means unchanged projects do not pay the install cost on every push.
+
+## Step runners
+
+`.runner(name, options)` runs a single CI step from within the cached environment. Steps run in an isolated sandbox with access to the installed dependencies.
+
+```ts
+deps.runner("typecheck", {
+	exec: "pnpm exec turbo run typecheck",
+	capture: false,
+});
+```
+
+`capture: true` streams step output live into the CI run log so errors appear inline. `capture: false` suppresses output unless the step fails.
+
+## Parallel steps
+
+Because each `.runner()` call returns a promise, you can run steps in parallel with `Promise.all`. All steps share the same dependency snapshot, so there is no redundant install work.
+
+```ts
+await Promise.all([
+	deps.runner("build", { exec: "pnpm exec turbo run build" }),
+	deps.runner("typecheck", { exec: "pnpm exec turbo run typecheck", capture: false }),
+	deps.runner("lint", { exec: "pnpm exec turbo run lint", capture: false }),
+	deps.runner("test", { exec: "pnpm exec turbo run test", capture: false }),
+	deps.runner("format", { exec: "pnpm exec turbo run format:check", capture: false }),
+]);
+```
+
+If any step fails, the `Promise.all` rejects and the Workflow fails. Because Workflows support step-level retries and restart-from-step, you can rerun from the failed step without repeating the entire pipeline.
+
+## Release steps
+
+After checks pass, the release phase runs only on pushes to the default branch. The `deps.build()` method prepares a Worker for deployment and returns an object with three release actions:
+
+- `.deploy()` — deploys the Worker to production
+- `.preview()` — creates a [preview URL](/workers/versions-and-deployments/preview-urls/) version without promoting it to production
+- `.release()` — uploads as a version and promotes to the active deployment
+
+```ts
+const { trigger, branch, defaultBranch } = event.payload;
+
+if (trigger !== "push" || branch !== defaultBranch) {
+	return;
+}
+
+await Promise.all(
+	workers.map((worker) =>
+		deps
+			.build({ worker: worker.name, config: worker.config })
+			.release(),
+	),
+);
+```
+
+## Trigger gating
+
+`CiParams` exposes the trigger context so you can stop the pipeline early for runs that should not deploy. A push to a non-default branch runs checks but does not deploy. A pull request trigger runs checks only.
+
+```ts
+const { trigger, branch, defaultBranch } = event.payload;
+
+if (trigger !== "push" || branch !== defaultBranch) {
+	return; // checks passed — no deploy needed
+}
+
+// deploy phase
+```
+
+## Observability
+
+Each pipeline run appears as a Workflow instance in the Workflows tab of the Cloudflare dashboard. Steps map to Workflow step logs. If a step fails, the step log contains the captured output and the error message.
+
+Because the pipeline is a Workflow, [Workflows observability](/workflows/observability/) applies: you can inspect instance state, view step durations, and replay failed instances from the last successful step.
+
+## Learn more
+
+- [Get started](/artifacts/ci/get-started/) — write and trigger your first `cloudflare.ci.ts`
+- [Reference](/artifacts/ci/reference/) — full API for `CIWorkflow`, `step.cache`, `step.runner`, and build actions
+- [Migrate from GitHub Actions](/artifacts/ci/github-actions-migration/) — map your existing YAML pipeline to `cloudflare.ci.ts`

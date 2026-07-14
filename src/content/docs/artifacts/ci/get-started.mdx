@@ -1,0 +1,130 @@
+---
+title: Get started with CI
+description: Write your first cloudflare.ci.ts pipeline and trigger it from an Artifacts repository push.
+pcx_content_type: get-started
+sidebar:
+  order: 2
+products:
+  - artifacts
+---
+
+import { Steps, TypeScriptExample } from "~/components";
+
+This guide creates a `cloudflare.ci.ts` pipeline that installs dependencies, runs checks in parallel, and deploys your Worker on push to the default branch. The pipeline runs as a [Workflow](/workflows/) triggered by a push to an [Artifacts](/artifacts/) repository.
+
+## Prerequisites
+
+- An Artifacts repository. Refer to [Get started with Artifacts](/artifacts/get-started/) if you do not have one.
+- A Worker project with a `cloudflare.config.ts`.
+- `pnpm` and a `pnpm-lock.yaml` in your project root. Adapt the commands below if you use a different package manager.
+
+## 1. Create cloudflare.ci.ts
+
+Create `cloudflare.ci.ts` at the root of your project.
+
+<TypeScriptExample filename="cloudflare.ci.ts">
+
+```ts
+import { CIWorkflow } from "cloudflare:ci";
+import type { WorkflowEvent } from "cloudflare:workers";
+import type { CiParams, CiRunnerStep } from "cloudflare:ci";
+
+export class CI extends CIWorkflow {
+	protected async pipeline(
+		event: WorkflowEvent<CiParams>,
+		step: CiRunnerStep,
+	): Promise<void> {
+		const { trigger, branch, defaultBranch } = event.payload;
+
+		// Install dependencies and cache the result.
+		const deps = await step
+			.cache(["pnpm-lock.yaml", "package.json"])
+			.runner("install", { exec: "pnpm install --frozen-lockfile" });
+
+		// Run checks in parallel from the cached snapshot.
+		await Promise.all([
+			deps.runner("build", { exec: "pnpm run build" }),
+			deps.runner("typecheck", { exec: "pnpm run typecheck", capture: false }),
+			deps.runner("lint", { exec: "pnpm run lint", capture: false }),
+			deps.runner("test", { exec: "pnpm run test", capture: false }),
+		]);
+
+		// Deploy only on push to the default branch.
+		if (trigger !== "push" || branch !== defaultBranch) {
+			return;
+		}
+
+		await deps.build({ worker: "my-worker", config: "./cloudflare.config.ts" }).release();
+	}
+}
+```
+
+</TypeScriptExample>
+
+## 2. Configure the CI Worker
+
+Create a separate `cloudflare.config.ts` for the Worker that runs your CI pipeline. This is distinct from the Worker being built and deployed by the pipeline.
+
+Export the `CIWorkflow` class and declare a `push` trigger so the pipeline runs whenever commits land on `main` in your Artifacts repository.
+
+<TypeScriptExample filename="cloudflare.config.ts">
+
+```ts
+import { defineConfig } from "cloudflare/config";
+
+export default defineConfig({
+	name: "my-worker-ci",
+	compatibilityDate: "2026-01-01",
+	compatibilityFlags: ["nodejs_compat"],
+	exports: {
+		CI: {
+			type: "workflow",
+		},
+	},
+	triggers: [
+		{
+			type: "push",
+			repo: "my-repo",
+			branch: "main",
+			run: "CI",
+		},
+	],
+});
+```
+
+</TypeScriptExample>
+
+The `push` trigger names the Artifacts `repo` to watch, the `branch` to match, and the exported Workflow to `run`. When a matching push arrives, Cloudflare creates a new Workflow instance and passes the push context as the `CiParams` payload.
+
+## 3. Push cloudflare.ci.ts to your Artifacts repo
+
+Push your project — including `cloudflare.ci.ts` — to your Artifacts repository so the pipeline code is versioned alongside the code it builds.
+
+```sh
+git add cloudflare.ci.ts cloudflare.config.ts
+git commit -m "Add CI pipeline"
+git push
+```
+
+## 4. Deploy the CI Worker
+
+Deploy the CI Worker to your account. Deploying registers the `push` trigger against your Artifacts repository.
+
+```sh
+npx wrangler deploy
+```
+
+## 5. Trigger a run
+
+Push a commit to your Artifacts repository on the `main` branch. The `push` trigger matches, creates a Workflow instance, and begins the pipeline.
+
+## View pipeline runs
+
+In the [Cloudflare dashboard](https://dash.cloudflare.com), go to **Workers and Pages**, select your CI Worker, and open the **Workflows** tab. Each pipeline run appears as a Workflow instance with step-level logs showing build output, test results, and deployment status.
+
+## Next steps
+
+- [How CI works](/artifacts/ci/how-ci-works/) — understand caching, runners, and parallelism
+- [Reference](/artifacts/ci/reference/) — full `CIWorkflow` API
+- [Migrate from GitHub Actions](/artifacts/ci/github-actions-migration/) — convert an existing YAML pipeline
+- [Health-mediated deployments](/artifacts/deployments/) — add progressive rollout to your release step

@@ -1,0 +1,181 @@
+---
+title: How health-mediated deployments work
+description: Understand how HMDWorkflow, health queries, rollout steps, and automatic rollback compose into a progressive Worker deployment.
+pcx_content_type: concept
+sidebar:
+  order: 2
+products:
+  - artifacts
+---
+
+import { TypeScriptExample } from "~/components";
+
+A health-mediated deployment (HMD) is a [Workflow](/workflows/) that promotes a Worker version through a series of percentage steps. At each step, the Workflow waits for a soak time and checks observability signals before deciding to continue, pause, or roll back.
+
+:::note
+
+The `cloudflare:hmd` package name is subject to change before general availability.
+
+:::
+
+## HMDWorkflow
+
+`HMDWorkflow` is a base class imported from `cloudflare:hmd`. You extend it and implement one method: `rollout`. The runtime calls `rollout` when a new version is ready to deploy.
+
+```ts
+// cloudflare.hmd.ts
+import { HMDWorkflow } from "cloudflare:hmd";
+import type { Version } from "cloudflare:hmd";
+import type { WorkflowStep } from "cloudflare:workers";
+
+export class MyHMD extends HMDWorkflow {
+	protected async rollout(version: Version, step: WorkflowStep): Promise<void> {
+		// your rollout logic
+	}
+}
+```
+
+The `Version` object represents the Worker version being deployed. `WorkflowStep` is the standard [Workflows step API](/workflows/build/workers-api/) extended with HMD-specific methods.
+
+## Rollout steps
+
+A rollout progresses through percentage steps. Each step uses three primitives:
+
+### step.sleep
+
+Waits for a soak time before checking health. This gives traffic time to accumulate at the current percentage so health signals are meaningful.
+
+```ts
+await step.sleep(`soak at ${pct}%`, "5 minutes");
+```
+
+### step.health
+
+Queries [Workers Observability](/workers/observability/) for health signals at the current version. Pass a structured query that describes the metric and threshold to check. If the query finds a breach, `step.health` returns a failure result that the caller uses to decide whether to roll back.
+
+```ts
+const health = await step.health({
+	metric: "error_rate",
+	filter: { status_code: 500 },
+	threshold: 0.06, // 6% error rate
+	window: "5 minutes",
+});
+```
+
+Workers Observability collects logs and invocation data from your Worker. Use the [Workers Observability Query Builder](/workers/observability/query-builder/) to explore available metrics and build queries interactively before embedding them in your HMD.
+
+### step.rollout
+
+Promotes the version to a new traffic percentage. If a `rollback` callback is provided and the deployment later needs to revert, the Workflow calls `version.abort()` to return traffic to the previous version.
+
+```ts
+await step.rollout(`rollout to ${pct}%`, pct, {
+	rollback: (ctx) => version.abort(ctx.output),
+});
+```
+
+## A complete rollout
+
+This example rolls out through ten percentage steps, checking health at each one. If a health check fails at any step, `version.abort()` reverts traffic to the previous version.
+
+<TypeScriptExample filename="cloudflare.hmd.ts">
+
+```ts
+import { HMDWorkflow } from "cloudflare:hmd";
+import type { Version } from "cloudflare:hmd";
+import type { WorkflowStep } from "cloudflare:workers";
+
+const STEPS = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+
+export class MyHMD extends HMDWorkflow {
+	protected async rollout(version: Version, step: WorkflowStep): Promise<void> {
+		for (const pct of STEPS) {
+			await step.sleep(`soak at ${pct}%`, "5 minutes");
+
+			const health = await step.health({
+				metric: "error_rate",
+				filter: { status_code: 500 },
+				threshold: 0.06,
+				window: "5 minutes",
+			});
+
+			await step.rollout(`rollout to ${pct}%`, pct, {
+				rollback: (ctx) => version.abort(ctx.output),
+			});
+		}
+	}
+}
+```
+
+</TypeScriptExample>
+
+## Manual progression
+
+By default, the rollout progresses automatically as long as health checks pass. To require a human to approve each step before continuing, replace `step.sleep` with `step.waitForEvent`. The Workflow pauses until an external signal arrives — for example, an operator confirms the deployment is healthy.
+
+```ts
+await step.waitForEvent(`approve ${pct}%`, {
+	event: "approved",
+	timeout: "1 hour",
+});
+```
+
+If no approval arrives within the timeout, the Workflow can roll back or notify the operator.
+
+## Rollback
+
+When `version.abort()` is called, traffic returns to the version that was active before the rollout began. The Workflow instance records the rollback reason and marks the step as failed.
+
+You can also trigger a rollback externally by sending an event to the Workflow instance, for example from a dashboard action or an on-call alert.
+
+## Observability
+
+Each rollout runs as a Workflow instance. In the Cloudflare dashboard, go to your Worker's **Deployments** tab to see:
+
+- Which Workflow instance corresponds to which deployment
+- Step logs showing soak durations, health query results, and rollout percentages
+- Whether the rollout completed, paused for manual approval, or rolled back
+
+Because HMD is a Workflow, all [Workflows observability](/workflows/observability/) tools apply.
+
+## Configuration
+
+HMD is enabled per Worker in `cloudflare.config.ts`. The `hmd` key accepts either the built-in Cloudflare plan or a path to your `cloudflare.hmd.ts`.
+
+**Simple case** — Cloudflare manages the rollout plan:
+
+```ts
+// cloudflare.config.ts
+import { defineConfig } from "cloudflare/config";
+
+export default defineConfig({
+	name: "my-worker",
+	compatibilityDate: "2026-01-01",
+	hmd: {
+		plan: "cloudflare/default",
+	},
+});
+```
+
+**BYO Workflow** — point to your `cloudflare.hmd.ts`:
+
+```ts
+// cloudflare.config.ts
+import { defineConfig } from "cloudflare/config";
+
+export default defineConfig({
+	name: "my-worker",
+	compatibilityDate: "2026-01-01",
+	hmd: {
+		plan: "./cloudflare.hmd.ts",
+	},
+});
+```
+
+Once HMD is enabled, every deployment — whether triggered by `wrangler deploy`, Workers Builds, or a CI pipeline — uses the HMD rollout rather than an immediate 100% promotion.
+
+## Learn more
+
+- [Get started](/artifacts/deployments/get-started/) — enable HMD for your Worker with `cf hmd start`
+- [Write your own HMD Workflow](/artifacts/deployments/write-your-own/) — custom health queries, Flagship flags, BYO runner
+- [Reference](/artifacts/deployments/reference/) — full `HMDWorkflow` API and `cloudflare.config.ts` HMD config fields

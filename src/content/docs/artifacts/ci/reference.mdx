@@ -1,0 +1,165 @@
+---
+title: CI reference
+description: Full API reference for CIWorkflow, step.cache, step.runner, and build actions.
+pcx_content_type: reference
+sidebar:
+  order: 3
+head:
+  - tag: title
+    content: CI reference · Artifacts
+products:
+  - artifacts
+---
+
+import { Type, MetaInfo } from "~/components";
+
+:::note
+
+The `cloudflare:ci` package name is subject to change before general availability.
+
+:::
+
+## CIWorkflow
+
+`CIWorkflow` is a base class imported from `cloudflare:ci`. Extend it and implement `pipeline` to define your CI logic.
+
+```ts
+import { CIWorkflow } from "cloudflare:ci";
+import type { WorkflowEvent } from "cloudflare:workers";
+import type { CiParams, CiRunnerStep } from "cloudflare:ci";
+
+export class CI extends CIWorkflow {
+	protected async pipeline(
+		event: WorkflowEvent<CiParams>,
+		step: CiRunnerStep,
+	): Promise<void> {}
+}
+```
+
+### `pipeline(event, step)`
+
+The single method you implement. Called once per pipeline run.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `event` | <Type text="WorkflowEvent<CiParams>" /> | Workflow event carrying trigger context in `event.payload`. |
+| `step` | <Type text="CiRunnerStep" /> | The CI step API. Use `step.cache()` and `step.runner()` to build your pipeline. |
+
+## CiParams
+
+`CiParams` is the payload shape carried by `WorkflowEvent<CiParams>`. It describes the push or pull request that triggered the run.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `trigger` | <Type text='"push" \| "pull_request" \| "tag"' /> | What triggered the pipeline run. |
+| `branch` | <Type text="string" /> | The branch name that was pushed or the head branch of the pull request. |
+| `defaultBranch` | <Type text="string" /> | The repository's default branch (for example, `main`). Use this to gate deploy steps. |
+| `sha` | <Type text="string" /> | The commit SHA that triggered the run. |
+| `repo` | <Type text="string" /> | The repository name within the Artifacts namespace. |
+
+## CiRunnerStep
+
+`CiRunnerStep` is the step API passed as the second argument to `pipeline`. It extends the base Workflow step with CI-specific methods.
+
+### `step.cache(lockfiles)`
+
+Installs dependencies and returns a `CiSnapshot` that subsequent steps can use.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `lockfiles` | <Type text="string[]" /> | Glob patterns for lockfiles and manifests that determine cache validity. If none have changed since the last run, the cache is reused and the install step is skipped. |
+
+Returns: `CiSnapshotBuilder`
+
+The returned builder exposes `.runner(name, options)` to chain the install step directly.
+
+```ts
+const deps = await step
+	.cache(["pnpm-lock.yaml", "package.json"])
+	.runner("install", { exec: "pnpm install --frozen-lockfile" });
+```
+
+### `step.runner(name, options)` / `snapshot.runner(name, options)`
+
+Runs a single command in an isolated sandbox that has access to the cached dependencies.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `name` | <Type text="string" /> <MetaInfo text="required" /> | A unique label for this step. Appears in the Workflow step log. |
+| `options.exec` | <Type text="string" /> <MetaInfo text="required" /> | The shell command to run. |
+| `options.capture` | <Type text="boolean" /> <MetaInfo text="optional (default: true)" /> | Stream output live into the step log. Set to `false` to suppress output unless the step fails. |
+
+Returns: `Promise<CiSnapshot>`
+
+The returned `CiSnapshot` exposes `.runner()` and `.build()` for chaining additional steps.
+
+```ts
+deps.runner("typecheck", {
+	exec: "pnpm exec turbo run typecheck",
+	capture: false,
+});
+```
+
+## CiSnapshot
+
+`CiSnapshot` is the result of a successful `step.cache().runner()` call. It represents a reusable dependency snapshot and is the starting point for running steps and building Workers.
+
+### `snapshot.runner(name, options)`
+
+Same signature as `step.runner`. Runs a command within the snapshot environment.
+
+### `snapshot.build(options)`
+
+Prepares a Worker for release from the cached snapshot. Returns a `CiBuildHandle`.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `options.worker` | <Type text="string" /> <MetaInfo text="required" /> | The Worker name as it appears in `cloudflare.config.ts`. |
+| `options.config` | <Type text="string" /> <MetaInfo text="optional" /> | Path to the Worker's `cloudflare.config.ts`. Defaults to `./cloudflare.config.ts`. |
+
+Returns: `CiBuildHandle`
+
+```ts
+const handle = deps.build({ worker: "my-worker", config: "./cloudflare.config.ts" });
+```
+
+## CiBuildHandle
+
+`CiBuildHandle` is returned by `snapshot.build()`. It exposes three release actions.
+
+### `.deploy()`
+
+Deploys the Worker to production. Equivalent to `wrangler deploy`.
+
+Returns: `Promise<void>`
+
+### `.preview()`
+
+Uploads the Worker as a new [version](/workers/versions-and-deployments/) without promoting it to the active deployment. Use this to generate [preview URLs](/workers/versions-and-deployments/preview-urls/) for pull requests.
+
+Returns: `Promise<void>`
+
+### `.release()`
+
+Uploads the Worker as a new version and promotes it to the active deployment. Use this for production releases from the default branch.
+
+Returns: `Promise<void>`
+
+## Exporting from cloudflare.config.ts
+
+To use `CIWorkflow` as a Workflow, export the class under `exports` in your CI Worker's `cloudflare.config.ts`.
+
+```ts
+// cloudflare.config.ts (CI Worker)
+import { defineConfig } from "cloudflare/config";
+
+export default defineConfig({
+	name: "my-worker-ci",
+	compatibilityDate: "2026-01-01",
+	exports: {
+		CI: {
+			type: "workflow",
+		},
+	},
+});
+```

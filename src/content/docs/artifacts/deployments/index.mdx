@@ -1,0 +1,64 @@
+---
+title: Deployments
+description: Roll out Workers progressively with health-mediated deployments orchestrated as Workflows.
+pcx_content_type: overview
+sidebar:
+  order: 5
+  group:
+    hideIndex: true
+products:
+  - artifacts
+---
+
+import { CardGrid, Description, LinkTitleCard } from "~/components";
+
+<Description>
+
+Progressive Worker rollouts with automatic health checks, built on Workflows.
+
+</Description>
+
+Health-mediated deployments (HMD) let you roll out a new Worker version in percentage steps — pausing at each step to check error rates before continuing. If a health check fails, the rollout pauses or rolls back automatically.
+
+HMD is built on [Workflows](/workflows/). Each rollout is a durable Workflow instance that carries the deployment through its steps, waits for soak times, checks observability signals, and promotes or reverts the version based on the result.
+
+Two modes are available:
+
+- **Simple case** — add `hmd.plan: "cloudflare/default"` to your `cloudflare.config.ts`. Cloudflare manages the rollout plan with sensible defaults for percentages, soak times, and error thresholds.
+- **BYO Workflow** — write a `cloudflare.hmd.ts` file that extends `HMDWorkflow`. Define your own rollout percentages, health queries, soak times, and Flagship flag changes.
+
+<CardGrid>
+
+<LinkTitleCard
+	title="How HMD works"
+	href="/artifacts/deployments/how-hmd-works/"
+	icon="document"
+>
+	Learn how HMDWorkflow, health queries, and rollout steps compose into a progressive deployment.
+</LinkTitleCard>
+
+<LinkTitleCard
+	title="Get started"
+	href="/artifacts/deployments/get-started/"
+	icon="open-book"
+>
+	Enable HMD for your Worker with cf hmd start and watch your first rollout.
+</LinkTitleCard>
+
+<LinkTitleCard
+	title="Write your own HMD Workflow"
+	href="/artifacts/deployments/write-your-own/"
+	icon="document"
+>
+	Extend HMDWorkflow with custom health queries, Flagship flags, and external integrations.
+</LinkTitleCard>
+
+<LinkTitleCard
+	title="Reference"
+	href="/artifacts/deployments/reference/"
+	icon="document"
+>
+	Full API for HMDWorkflow, step.health, step.rollout, and cloudflare.config.ts HMD config.
+</LinkTitleCard>
+
+</CardGrid>

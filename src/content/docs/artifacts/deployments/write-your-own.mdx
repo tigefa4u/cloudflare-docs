@@ -1,0 +1,226 @@
+---
+title: Write your own HMD Workflow
+description: Extend HMDWorkflow with custom health queries, Flagship flag changes, and a BYO runner with external integrations.
+pcx_content_type: how-to
+sidebar:
+  order: 3
+products:
+  - artifacts
+---
+
+import { Steps, TypeScriptExample } from "~/components";
+
+A BYO HMD Workflow gives you full control over rollout percentages, health queries, soak times, and post-rollout actions. You define the logic in `cloudflare.hmd.ts` and point your `cloudflare.config.ts` at that file.
+
+:::note
+
+The `cloudflare:hmd` package name is subject to change before general availability.
+
+:::
+
+## 1. Create cloudflare.hmd.ts
+
+Create `cloudflare.hmd.ts` at the root of your project. Extend `HMDWorkflow` and implement `rollout`.
+
+<TypeScriptExample filename="cloudflare.hmd.ts">
+
+```ts
+import { HMDWorkflow } from "cloudflare:hmd";
+import type { Version } from "cloudflare:hmd";
+import type { WorkflowStep } from "cloudflare:workers";
+
+const STEPS = [10, 25, 50, 75, 100];
+
+export class MyHMD extends HMDWorkflow {
+	protected async rollout(version: Version, step: WorkflowStep): Promise<void> {
+		for (const pct of STEPS) {
+			// Wait for traffic to accumulate before querying health.
+			await step.sleep(`soak at ${pct}%`, "5 minutes");
+
+			// Query Workers Observability for the error rate at this version.
+			const health = await step.health({
+				metric: "error_rate",
+				filter: { status_code: 500 },
+				threshold: 0.06,
+				window: "5 minutes",
+			});
+
+			// Promote traffic to the next percentage.
+			// If health failed, roll back to the previous version.
+			await step.rollout(`rollout to ${pct}%`, pct, {
+				rollback: (ctx) => version.abort(ctx.output),
+			});
+		}
+	}
+}
+```
+
+</TypeScriptExample>
+
+## 2. Point cloudflare.config.ts at the plan
+
+Update your Worker's `cloudflare.config.ts` to reference the `cloudflare.hmd.ts` file:
+
+<TypeScriptExample filename="cloudflare.config.ts">
+
+```ts
+import { defineConfig } from "cloudflare/config";
+
+export default defineConfig({
+	name: "my-worker",
+	compatibilityDate: "2026-01-01",
+	hmd: {
+		plan: "./cloudflare.hmd.ts",
+	},
+});
+```
+
+</TypeScriptExample>
+
+## Health queries
+
+`step.health(query)` queries [Workers Observability](/workers/observability/) for the metric you specify. The query shape mirrors the structured queries you can build interactively in the [Workers Observability Query Builder](/workers/observability/query-builder/).
+
+```ts
+const health = await step.health({
+	metric: "error_rate",       // Workers Observability metric name
+	filter: { status_code: 500 }, // filter to a specific status code
+	threshold: 0.06,            // breach threshold (6%)
+	window: "5 minutes",        // lookback window for the metric
+});
+```
+
+You can query multiple signals and combine results. For example, query both 5xx error rate and 429 rate:
+
+```ts
+const [errors, rateLimit] = await Promise.all([
+	step.health({ metric: "error_rate", filter: { status_code: 500 }, threshold: 0.06, window: "5 minutes" }),
+	step.health({ metric: "error_rate", filter: { status_code: 429 }, threshold: 0.10, window: "5 minutes" }),
+]);
+
+if (errors.breached || rateLimit.breached) {
+	await version.abort("health check failed");
+	return;
+}
+```
+
+## Flagship flag changes
+
+After a successful rollout, update [Flagship](/flagship/) feature flags to match the new version. Use a Flagship binding in your HMD runner Worker to change flag states as part of the rollout completion.
+
+<TypeScriptExample filename="cloudflare.hmd.ts">
+
+```ts
+import { HMDWorkflow } from "cloudflare:hmd";
+import type { Version } from "cloudflare:hmd";
+import type { WorkflowStep } from "cloudflare:workers";
+
+const STEPS = [10, 25, 50, 75, 100];
+
+export class MyHMD extends HMDWorkflow {
+	protected async rollout(version: Version, step: WorkflowStep): Promise<void> {
+		for (const pct of STEPS) {
+			await step.sleep(`soak at ${pct}%`, "5 minutes");
+
+			await step.health({
+				metric: "error_rate",
+				filter: { status_code: 500 },
+				threshold: 0.06,
+				window: "5 minutes",
+			});
+
+			await step.rollout(`rollout to ${pct}%`, pct, {
+				rollback: (ctx) => version.abort(ctx.output),
+			});
+		}
+
+		// Rollout complete — enable the new feature flag.
+		await step.do("enable feature flag", async () => {
+			await this.env.FLAGS.setBoolean("new-checkout-flow", true);
+		});
+	}
+}
+```
+
+</TypeScriptExample>
+
+Refer to the [Flagship binding documentation](/flagship/binding/) for the full API.
+
+## Manual progression
+
+Replace `step.sleep` with `step.waitForEvent` to require a human to approve each step. The Workflow pauses until an external event arrives.
+
+```ts
+await step.waitForEvent(`approve ${pct}%`, {
+	event: "approved",
+	timeout: "1 hour",
+});
+```
+
+If the timeout expires without an approval, you can roll back automatically:
+
+```ts
+const event = await step.waitForEvent(`approve ${pct}%`, {
+	event: "approved",
+	timeout: "1 hour",
+});
+
+if (!event || event.type === "timeout") {
+	await version.abort("approval timed out");
+	return;
+}
+```
+
+## BYO runner
+
+A custom runner Worker lets you inject additional bindings into the HMD Workflow — for example, a Workers Observability binding for direct metric access, or integrations with Sentry, ClickHouse, or an internal alerting system.
+
+### Define the runner Worker
+
+Create a Worker that implements `HMDEntrypoint`. This Worker receives the deploy event and spawns the HMD Workflow instance.
+
+<TypeScriptExample filename="src/runner.ts">
+
+```ts
+import { HMDEntrypoint } from "cloudflare:hmd";
+
+export class MyHMDRunner extends HMDEntrypoint {
+	async deploy(params: { deploymentId: string; workflow: string }): Promise<void> {
+		await this.env.MY_HMD.create({ params });
+	}
+}
+```
+
+</TypeScriptExample>
+
+### Configure the runner in cloudflare.config.ts
+
+Point `hmd.runner` at the runner Worker and class name. The runner Worker must be deployed separately.
+
+<TypeScriptExample filename="cloudflare.config.ts">
+
+```ts
+import { defineConfig } from "cloudflare/config";
+
+export default defineConfig({
+	name: "my-worker",
+	compatibilityDate: "2026-01-01",
+	hmd: {
+		runner: {
+			worker: "my-hmd-runner",
+			className: "MyHMDRunner",
+		},
+		plan: "./cloudflare.hmd.ts",
+	},
+});
+```
+
+</TypeScriptExample>
+
+The runner Worker's own `cloudflare.config.ts` declares any additional bindings it needs — Workers Observability, Flagship, external queues, or service bindings to your monitoring stack.
+
+## Next steps
+
+- [Reference](/artifacts/deployments/reference/) — full `HMDWorkflow` API, `step.health` query shape, and `cloudflare.config.ts` HMD config fields
+- [Workers Observability Query Builder](/workers/observability/query-builder/) — build and test health queries interactively
+- [Flagship binding](/flagship/binding/) — update feature flags as part of a rollout

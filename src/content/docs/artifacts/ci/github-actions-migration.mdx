@@ -1,0 +1,179 @@
+---
+title: Migrate from GitHub Actions
+description: Map your existing GitHub Actions YAML pipeline to a cloudflare.ci.ts Workflow.
+pcx_content_type: how-to
+sidebar:
+  order: 4
+head:
+  - tag: title
+    content: Migrate from GitHub Actions · Artifacts CI
+products:
+  - artifacts
+---
+
+import { Steps, TypeScriptExample } from "~/components";
+
+This guide maps a typical GitHub Actions workflow to an equivalent `cloudflare.ci.ts` pipeline. The concepts translate directly: `on:` triggers become `triggers` entries in `cloudflare.config.ts`, jobs become `Promise.all` blocks, and steps become `.runner()` calls.
+
+## Concept mapping
+
+| GitHub Actions | cloudflare.ci.ts |
+| --- | --- |
+| `.github/workflows/*.yml` | `cloudflare.ci.ts` |
+| `on: push` / `on: pull_request` | `push` trigger in `cloudflare.config.ts` |
+| `jobs` (parallel by default) | `Promise.all([...])` |
+| `steps[*].run` | `step.runner(name, { exec })` |
+| `cache` action | `step.cache([lockfiles])` |
+| `if: github.ref == 'refs/heads/main'` | `if (trigger !== 'push' \|\| branch !== defaultBranch)` |
+| Deploy job | `deps.build({ worker }).release()` |
+
+## Example
+
+The following GitHub Actions workflow runs checks in parallel and deploys on push to `main`.
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ hashFiles('pnpm-lock.yaml') }}
+      - run: pnpm install --frozen-lockfile
+
+      - name: build
+        run: pnpm run build
+      - name: typecheck
+        run: pnpm run typecheck
+      - name: lint
+        run: pnpm run lint
+      - name: test
+        run: pnpm run test
+
+  deploy:
+    needs: check
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pnpm install --frozen-lockfile
+      - run: npx wrangler deploy
+```
+
+The equivalent `cloudflare.ci.ts`:
+
+<TypeScriptExample filename="cloudflare.ci.ts">
+
+```ts
+import { CIWorkflow } from "cloudflare:ci";
+import type { WorkflowEvent } from "cloudflare:workers";
+import type { CiParams, CiRunnerStep } from "cloudflare:ci";
+
+export class CI extends CIWorkflow {
+	protected async pipeline(
+		event: WorkflowEvent<CiParams>,
+		step: CiRunnerStep,
+	): Promise<void> {
+		const { trigger, branch, defaultBranch } = event.payload;
+
+		// Install once and cache. Equivalent to actions/cache + pnpm install.
+		const deps = await step
+			.cache(["pnpm-lock.yaml", "package.json"])
+			.runner("install", { exec: "pnpm install --frozen-lockfile" });
+
+		// Run checks in parallel. Equivalent to independent steps in a job.
+		await Promise.all([
+			deps.runner("build", { exec: "pnpm run build" }),
+			deps.runner("typecheck", { exec: "pnpm run typecheck", capture: false }),
+			deps.runner("lint", { exec: "pnpm run lint", capture: false }),
+			deps.runner("test", { exec: "pnpm run test", capture: false }),
+		]);
+
+		// Gate deploy on push to default branch.
+		// Equivalent to: if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+		if (trigger !== "push" || branch !== defaultBranch) {
+			return;
+		}
+
+		// Deploy. Equivalent to: npx wrangler deploy
+		await deps.build({ worker: "my-worker" }).release();
+	}
+}
+```
+
+</TypeScriptExample>
+
+## Pull request previews
+
+For pull request builds, use `.preview()` instead of `.release()`. This uploads a new version and generates a [preview URL](/workers/versions-and-deployments/preview-urls/) without promoting it to the active deployment.
+
+<TypeScriptExample filename="cloudflare.ci.ts">
+
+```ts
+// After checks pass:
+if (trigger === "pull_request") {
+	await deps.build({ worker: "my-worker" }).preview();
+	return;
+}
+
+if (trigger === "push" && branch === defaultBranch) {
+	await deps.build({ worker: "my-worker" }).release();
+}
+```
+
+</TypeScriptExample>
+
+## Matrix builds
+
+GitHub Actions matrix builds fan out across multiple configurations. The equivalent in `cloudflare.ci.ts` is `Promise.all` over an array of workers or build targets.
+
+```yaml
+# GitHub Actions matrix
+jobs:
+  deploy:
+    strategy:
+      matrix:
+        worker: [api, frontend, worker-a]
+```
+
+<TypeScriptExample filename="cloudflare.ci.ts">
+
+```ts
+const workers = ["api", "frontend", "worker-a"];
+
+await Promise.all(
+	workers.map((worker) =>
+		deps.build({ worker, config: `./${worker}/cloudflare.config.ts` }).release(),
+	),
+);
+```
+
+</TypeScriptExample>
+
+## Triggering the pipeline
+
+GitHub Actions triggers on push via the GitHub webhook. With Cloudflare CI, you declare a `push` trigger in your CI Worker's `cloudflare.config.ts`:
+
+```ts
+triggers: [{ type: "push", repo: "my-repo", branch: "main", run: "CI" }];
+```
+
+Deploying the CI Worker registers the trigger against your Artifacts repository. Refer to [Get started](/artifacts/ci/get-started/) for the full configuration.
+
+If your source repository is still on GitHub or GitLab, you can mirror it into Artifacts using [import repositories](/artifacts/guides/import-repositories/) and trigger the CI pipeline from the Artifacts push.
+
+## Next steps
+
+- [Get started](/artifacts/ci/get-started/) — deploy your CI Worker and register the push trigger
+- [Reference](/artifacts/ci/reference/) — full `CIWorkflow` API
+- [Health-mediated deployments](/artifacts/deployments/) — add progressive rollout to your release step

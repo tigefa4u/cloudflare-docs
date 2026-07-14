@@ -1,0 +1,66 @@
+---
+title: CI
+description: Run CI pipelines entirely on Cloudflare by defining your build, test, and deploy steps as a Workflow in cloudflare.ci.ts.
+pcx_content_type: overview
+sidebar:
+  order: 4
+  group:
+    hideIndex: true
+products:
+  - artifacts
+---
+
+import { CardGrid, Description, LinkTitleCard } from "~/components";
+
+<Description>
+
+Define your entire CI pipeline in TypeScript. Run it on Cloudflare.
+
+</Description>
+
+CI on Workflows lets you replace external CI providers with a pipeline defined in `cloudflare.ci.ts`. Your pipeline runs as a [Workflow](/workflows/) triggered by a push to an [Artifacts](/artifacts/) repository. You declare the trigger in `cloudflare.config.ts` — no webhooks or external glue to wire up.
+
+A CI pipeline is just a Workflow. The `CIWorkflow` class extends `WorkflowEntrypoint` with primitives for dependency caching, parallel step execution, and release tasks. Because the pipeline is a Workflow, you get durable execution, automatic retries, and built-in observability at no extra cost.
+
+Use CI on Workflows when you need to:
+
+- Run lint, build, typecheck, test, and format in parallel from a single cached dependency snapshot
+- Deploy one Worker or many Workers across environments from the same pipeline run
+- Skip the pipeline entirely when dependencies have not changed
+- Integrate health-mediated deployments directly into your release step
+
+<CardGrid>
+
+<LinkTitleCard
+	title="How CI works"
+	href="/artifacts/ci/how-ci-works/"
+	icon="document"
+>
+	Learn how CIWorkflow, dependency caching, and step runners fit together.
+</LinkTitleCard>
+
+<LinkTitleCard
+	title="Get started"
+	href="/artifacts/ci/get-started/"
+	icon="open-book"
+>
+	Write your first cloudflare.ci.ts and trigger it from an Artifacts push.
+</LinkTitleCard>
+
+<LinkTitleCard
+	title="Reference"
+	href="/artifacts/ci/reference/"
+	icon="document"
+>
+	Full API reference for CIWorkflow, step.cache, step.runner, and build actions.
+</LinkTitleCard>
+
+<LinkTitleCard
+	title="Migrate from GitHub Actions"
+	href="/artifacts/ci/github-actions-migration/"
+	icon="document"
+>
+	Map your existing GitHub Actions YAML to a cloudflare.ci.ts Workflow.
+</LinkTitleCard>
+
+</CardGrid>

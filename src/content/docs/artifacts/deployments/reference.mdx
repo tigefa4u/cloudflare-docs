@@ -1,0 +1,232 @@
+---
+title: Deployments reference
+description: Full API reference for HMDWorkflow, step methods, Version, HMDEntrypoint, and the hmd key in cloudflare.config.ts.
+pcx_content_type: reference
+sidebar:
+  order: 4
+head:
+  - tag: title
+    content: Deployments reference · Artifacts
+products:
+  - artifacts
+---
+
+import { Type, MetaInfo } from "~/components";
+
+:::note
+
+The `cloudflare:hmd` package name is subject to change before general availability.
+
+:::
+
+## HMDWorkflow
+
+`HMDWorkflow` is a base class imported from `cloudflare:hmd`. Extend it and implement `rollout`.
+
+```ts
+import { HMDWorkflow } from "cloudflare:hmd";
+import type { Version } from "cloudflare:hmd";
+import type { WorkflowStep } from "cloudflare:workers";
+
+export class MyHMD extends HMDWorkflow {
+	protected async rollout(version: Version, step: WorkflowStep): Promise<void> {}
+}
+```
+
+### `rollout(version, step)`
+
+The single method you implement. Called once per deployment.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `version` | <Type text="Version" /> | The Worker version being deployed. Use `version.abort()` to revert. |
+| `step` | <Type text="WorkflowStep" /> | The standard Workflows step API, extended with HMD-specific methods. |
+
+## Version
+
+`Version` represents the Worker version under deployment.
+
+### `version.abort(reason?)`
+
+Reverts the deployment. Traffic returns to the version that was active before the rollout began.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `reason` | <Type text="string" /> <MetaInfo text="optional" /> | A human-readable reason recorded in the step log and deployment history. |
+
+Returns: `Promise<void>`
+
+```ts
+await version.abort("error rate exceeded threshold");
+```
+
+## step methods (HMD)
+
+These methods are available on the `WorkflowStep` object passed to `rollout`. They extend the [standard Workflows step API](/workflows/build/workers-api/).
+
+### `step.health(query)`
+
+Queries [Workers Observability](/workers/observability/) for the specified metric at the current version. Returns a `HealthResult`.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `query.metric` | <Type text="string" /> <MetaInfo text="required" /> | The Workers Observability metric to query (for example, `"error_rate"`). |
+| `query.filter` | <Type text="Record<string, string \| number>" /> <MetaInfo text="optional" /> | Filters applied to the metric query (for example, `{ status_code: 500 }`). |
+| `query.threshold` | <Type text="number" /> <MetaInfo text="required" /> | The value above which the health check is considered a breach. |
+| `query.window` | <Type text="string" /> <MetaInfo text="required" /> | Lookback window for the query (for example, `"5 minutes"`). |
+
+Returns: `Promise<HealthResult>`
+
+```ts
+const health = await step.health({
+	metric: "error_rate",
+	filter: { status_code: 500 },
+	threshold: 0.06,
+	window: "5 minutes",
+});
+```
+
+#### HealthResult
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `breached` | <Type text="boolean" /> | `true` if the metric exceeded the threshold. |
+| `value` | <Type text="number" /> | The observed metric value at query time. |
+| `threshold` | <Type text="number" /> | The threshold that was evaluated. |
+
+### `step.rollout(label, percentage, options?)`
+
+Promotes the version to the specified traffic percentage.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `label` | <Type text="string" /> <MetaInfo text="required" /> | A label for this rollout step. Appears in the deployment log. |
+| `percentage` | <Type text="number" /> <MetaInfo text="required" /> | Traffic percentage to promote to (1–100). |
+| `options.rollback` | <Type text="(ctx: RollbackContext) => Promise<void>" /> <MetaInfo text="optional" /> | Callback invoked if the deployment needs to revert. Typically calls `version.abort()`. |
+
+Returns: `Promise<void>`
+
+```ts
+await step.rollout(`rollout to ${pct}%`, pct, {
+	rollback: (ctx) => version.abort(ctx.output),
+});
+```
+
+#### RollbackContext
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `output` | <Type text="string" /> | The reason string passed to the rollback, typically from the health check result. |
+
+### `step.sleep(label, duration)`
+
+Inherited from the [Workflows step API](/workflows/build/sleeping-and-retrying/). Pauses the Workflow for the specified duration.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `label` | <Type text="string" /> | A label for this sleep step. |
+| `duration` | <Type text="string" /> | Duration string (for example, `"5 minutes"`, `"1 hour"`). |
+
+Returns: `Promise<void>`
+
+### `step.waitForEvent(label, options)`
+
+Inherited from the [Workflows step API](/workflows/build/events-and-parameters/). Pauses the Workflow until an external event arrives or the timeout expires. Use this for manual approval gates.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `label` | <Type text="string" /> | A label for this wait step. |
+| `options.event` | <Type text="string" /> | The event name to wait for. |
+| `options.timeout` | <Type text="string" /> | Maximum wait duration before the step times out. |
+
+Returns: `Promise<WorkflowEvent \| null>`
+
+## HMDEntrypoint
+
+`HMDEntrypoint` is the base class for BYO runner Workers. Extend it to inject custom bindings into the HMD Workflow.
+
+```ts
+import { HMDEntrypoint } from "cloudflare:hmd";
+
+export class MyHMDRunner extends HMDEntrypoint {
+	async deploy(params: { deploymentId: string; workflow: string }): Promise<void> {
+		await this.env.MY_HMD.create({ params });
+	}
+}
+```
+
+### `deploy(params)`
+
+Called when a new version is ready to deploy. Create a Workflow instance from within this method.
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `params.deploymentId` | <Type text="string" /> | The deployment ID assigned by Cloudflare. |
+| `params.workflow` | <Type text="string" /> | The name of the HMD Workflow class to invoke. |
+
+## cloudflare.config.ts — hmd key
+
+The `hmd` key in `cloudflare.config.ts` enables HMD for a Worker and configures the rollout plan.
+
+### Simple case
+
+```ts
+import { defineConfig } from "cloudflare/config";
+
+export default defineConfig({
+	name: "my-worker",
+	compatibilityDate: "2026-01-01",
+	hmd: {
+		plan: "cloudflare/default",
+		steps: [10, 25, 50, 75, 100],
+		soakTime: "5 minutes",
+		rollback: [{ statusCode: 500, threshold: 0.06 }],
+		onBreach: "rollback",
+	},
+});
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `plan` | <Type text='"cloudflare/default" \| string' /> <MetaInfo text="required" /> | `"cloudflare/default"` uses the Cloudflare-managed rollout plan. A relative file path (for example, `"./cloudflare.hmd.ts"`) uses your BYO Workflow. |
+| `steps` | <Type text="number[]" /> <MetaInfo text="optional (simple case only)" /> | Rollout percentages in order (default: `[10, 25, 50, 75, 100]`). |
+| `soakTime` | <Type text="string" /> <MetaInfo text="optional (simple case only)" /> | Soak time between steps (default: `"5 minutes"`). |
+| `rollback` | <Type text="Array<{ statusCode: number; threshold: number }>" /> <MetaInfo text="optional (simple case only)" /> | Error conditions that trigger a pause or rollback. |
+| `onBreach` | <Type text='"rollback" \| "pause"' /> <MetaInfo text='optional (default: "rollback")' /> | Whether to roll back automatically or pause for manual input when a threshold is breached. |
+
+### BYO Workflow
+
+```ts
+import { defineConfig } from "cloudflare/config";
+
+export default defineConfig({
+	name: "my-worker",
+	compatibilityDate: "2026-01-01",
+	hmd: {
+		plan: "./cloudflare.hmd.ts",
+	},
+});
+```
+
+### BYO runner
+
+```ts
+import { defineConfig } from "cloudflare/config";
+
+export default defineConfig({
+	name: "my-worker",
+	compatibilityDate: "2026-01-01",
+	hmd: {
+		runner: {
+			worker: "my-hmd-runner",
+			className: "MyHMDRunner",
+		},
+		plan: "./cloudflare.hmd.ts",
+	},
+});
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `runner.worker` | <Type text="string" /> <MetaInfo text="required" /> | The name of the deployed runner Worker. |
+| `runner.className` | <Type text="string" /> <MetaInfo text="required" /> | The exported class name of the `HMDEntrypoint` implementation. |
