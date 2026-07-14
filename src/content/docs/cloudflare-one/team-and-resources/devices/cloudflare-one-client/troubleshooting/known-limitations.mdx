@@ -248,6 +248,25 @@ To work around this issue, you can disable Lockdown mode while keeping Always-On
 2.  Use the [`auto_connect`](/cloudflare-one/team-and-resources/devices/cloudflare-one-client/deployment/mdm-deployment/parameters/#auto_connect) and [`switch_locked`](/cloudflare-one/team-and-resources/devices/cloudflare-one-client/deployment/mdm-deployment/parameters/#switch_locked) parameters in the managed configuration for seamless connectivity.
 3.  Instruct users to launch the Cloudflare One agent app and complete the one-time registration manually.
 
+## Repeated reinstalls on macOS with Microsoft Intune
+
+When you deploy the Cloudflare One Client `.pkg` to macOS with Microsoft Intune, Intune may repeatedly reinstall the package. Each reinstall restarts the client and briefly drops the WARP connection, and you may see multiple reinstalls within a single Intune evaluation cycle.
+
+This happens because of how Intune detects whether a macOS `.pkg` app is already installed. When you upload the package, Intune automatically populates the app's **Included apps** detection list from the bundles inside the package, and uses the app listed first as the primary app for detection. For the Cloudflare One Client, Intune lists a nested framework bundle (`io.flutter.flutter-macos`) first instead of the client's own bundle identifier (`com.cloudflare.1dot1dot1dot1.macos`). Because the primary detection bundle never matches an installed receipt on the device, Intune concludes that the app is missing and reinstalls it on every evaluation.
+
+To work around this issue, reorder the **Included apps** list so that the Cloudflare One Client bundle identifier is the primary detection app:
+
+1. In the [Microsoft Intune admin center](https://intune.microsoft.com), go to **Apps** > **macOS** and select the Cloudflare One Client app.
+2. Go to **Properties** and, next to **Detection rules**, select **Edit**.
+3. In the **Included apps** list, move `com.cloudflare.1dot1dot1dot1.macos` to the top so that it is the first (primary) app.
+4. Select **Review + save** to apply the change.
+
+![Reordering the Included apps list in Intune so that the Cloudflare One Client bundle identifier is the primary app](~/assets/images/cloudflare-one/connections/intune/intune-reorder-included-apps.gif)
+
+:::note
+Intune repopulates the **Included apps** list every time you upload a new Cloudflare One Client `.pkg` version, listing the nested framework bundle first again. Reapply this reorder each time you update the package.
+:::
+
 ## Windows 11 24H2 performance issues
 
 For Windows 11 24H2 users, Microsoft has confirmed a regression that may lead to performance issues like mouse lag, audio cracking, or other slowdowns. Cloudflare recommends users experiencing these issues upgrade to a minimum [Windows 11 24H2 version KB5062553](https://support.microsoft.com/en-us/topic/july-8-2025-kb5062553-os-build-26100-4652-523e69cb-051b-43c6-8376-6a76d6caeefd) or higher for resolution.

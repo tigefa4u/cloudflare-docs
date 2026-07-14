@@ -33,6 +33,7 @@ releaseNotes: |-
 
 
   - Registration may hang at "Checking your organization configuration" due to IPC errors. A system reboot should resolve the error, allowing registration to proceed.
+  - When deploying with Microsoft Intune, the client may be repeatedly reinstalled because Intune keys its install detection on a nested framework bundle instead of the client's own bundle identifier. See [Repeated reinstalls on macOS with Microsoft Intune](/cloudflare-one/team-and-resources/devices/cloudflare-one-client/troubleshooting/known-limitations/#repeated-reinstalls-on-macos-with-microsoft-intune) for the workaround.
 version: 2026.6.822.0
 releaseDate: 2026-06-29T20:05:45.037Z
 packageURL: https://downloads.cloudflareclient.com/v1/download/macos/version/2026.6.822.0
